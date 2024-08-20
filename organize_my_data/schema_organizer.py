@@ -1,8 +1,9 @@
 import json
 import os
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 from openai import OpenAI
+import tiktoken
 
 class SchemaOrganizer:
     def __init__(self, api_key: str, config_file: str = 'config.json'):
@@ -10,6 +11,7 @@ class SchemaOrganizer:
         self.logger = self.setup_logger()
         self.config = self.load_config(config_file)
         self.schema = self.load_schema()
+        self.encoder = tiktoken.encoding_for_model(self.config['model'])
 
     @staticmethod
     def setup_logger():
@@ -62,21 +64,60 @@ class SchemaOrganizer:
         except FileNotFoundError:
             raise FileNotFoundError(f"Input file not found: {text_file}")
 
+    def count_tokens(self, text: str) -> int:
+        return len(self.encoder.encode(text))
+
+    def split_text(self, text: str, max_tokens: int = 4000) -> List[str]:
+        chunks = []
+        current_chunk = []
+        current_length = 0
+
+        for line in text.split('\n'):
+            line_length = self.count_tokens(line)
+            if current_length + line_length > max_tokens:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = [line]
+                current_length = line_length
+            else:
+                current_chunk.append(line)
+                current_length += line_length
+
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+
+        return chunks
+
     def organize_text(self, text: str) -> Dict[str, Any]:
         try:
-            self.logger.debug("Sending text to GPT for organization")
-            response = self.client.chat.completions.create(
-                model=self.config['model'],
-                messages=[
-                    {"role": "system", "content": "You are an assistant that organizes content into a provided structure. Analyze the given text and structure it according to the provided schema. Your response should be in JSON format."},
-                    {"role": "user", "content": f"Organize the following content according to this structure and respond with a JSON object:\n\n{json.dumps(self.schema, indent=2)}\n\nContent to organize:\n\n{text}"}
-                ],
-                response_format={"type": "json_object"}
-            )
-            
-            organized_data = json.loads(response.choices[0].message.content)
-            self.logger.debug(f"Received response from GPT: {json.dumps(organized_data, indent=2)}")
-            
+            self.logger.debug("Splitting text into chunks")
+            chunks = self.split_text(text)
+            organized_data = {}
+
+            for i, chunk in enumerate(chunks):
+                self.logger.debug(f"Processing chunk {i+1}/{len(chunks)}")
+                response = self.client.chat.completions.create(
+                    model=self.config['model'],
+                    messages=[
+                        {"role": "system", "content": "You are an assistant that organizes content into a provided structure. Analyze the given text and structure it according to the provided schema. Your response should be in JSON format."},
+                        {"role": "user", "content": f"Organize the following content according to this structure and respond with a JSON object. If the content is incomplete, fill in as much as possible:\n\n{json.dumps(self.schema, indent=2)}\n\nContent to organize:\n\n{chunk}"}
+                    ],
+                    response_format={"type": "json_object"}
+                )
+                
+                chunk_data = json.loads(response.choices[0].message.content)
+                self.logger.debug(f"Received response from GPT for chunk {i+1}")
+
+                # Merge chunk_data into organized_data
+                for key, value in chunk_data.items():
+                    if key not in organized_data:
+                        organized_data[key] = value
+                    elif isinstance(value, str):
+                        organized_data[key] = organized_data[key] + " " + value
+                    elif isinstance(value, list):
+                        organized_data[key].extend(value)
+                    elif isinstance(value, dict):
+                        organized_data[key].update(value)
+
             return organized_data
         except Exception as e:
             self.logger.error(f"Error in organizing text: {str(e)}")
@@ -94,7 +135,7 @@ class SchemaOrganizer:
     def process_file(self, input_file: str, output_file: str):
         try:
             input_text = self.load_text(input_file)
-            self.logger.debug(f"Input text: {input_text}")
+            self.logger.debug(f"Input text loaded from {input_file}")
             organized_data = self.organize_text(input_text)
             
             if not organized_data:
