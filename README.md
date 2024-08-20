@@ -75,7 +75,7 @@ The configuration is stored in `config.json`:
 {
   "use_predefined_schema": false,
   "custom_schema_file": "my_schema.json",
-  "model": "gpt-4-0125-preview"
+  "model": "gpt-4o-mini"
 }
 ```
 
